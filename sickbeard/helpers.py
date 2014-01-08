@@ -139,7 +139,7 @@ def sanitizeFileName(name):
     return name
 
 
-def getURL(url, headers=[]):
+def getURL(url, post_data=None, headers=[]):
     """
     Returns a byte-string retrieved from the url provider.
     """
@@ -150,7 +150,7 @@ def getURL(url, headers=[]):
         opener.addheaders.append(cur_header)
 
     try:
-        usock = opener.open(url)
+        usock = opener.open(url, post_data)
         url = usock.geturl()
         encoding = usock.info().get("Content-Encoding")
 
@@ -505,17 +505,23 @@ def make_dirs(path):
     return True
 
 
-def rename_ep_file(cur_path, new_path):
+def rename_ep_file(cur_path, new_path, old_path_length=0):
     """
     Creates all folders needed to move a file to its new location, renames it, then cleans up any folders
     left that are now empty.
 
     cur_path: The absolute path to the file you want to move/rename
     new_path: The absolute path to the destination for the file WITHOUT THE EXTENSION
+    old_path_length: The length of media file path (old name) WITHOUT THE EXTENSION
     """
 
-    new_dest_dir, new_dest_name = os.path.split(new_path)  #@UnusedVariable
-    cur_file_name, cur_file_ext = os.path.splitext(cur_path)  #@UnusedVariable
+    new_dest_dir, new_dest_name = os.path.split(new_path)  # @UnusedVariable
+    if old_path_length == 0 or old_path_length > len(cur_path):
+        # approach from the right
+        cur_file_name, cur_file_ext = os.path.splitext(cur_path)  # @UnusedVariable
+    else:
+        # approach from the left
+        cur_file_ext = cur_path[old_path_length:]
 
     # put the extension on the incoming file
     new_path += cur_file_ext
@@ -776,26 +782,30 @@ def get_xml_text(element, mini_dom=False):
     return text.strip()
 
 
-def backupVersionedFile(oldFile, version):
+def backupVersionedFile(old_file, version):
+
     numTries = 0
 
-    newFile = oldFile + '.' + 'v' + str(version)
+    new_file = old_file + '.' + 'v' + str(version)
 
-    while not ek.ek(os.path.isfile, newFile):
-        if not ek.ek(os.path.isfile, oldFile):
+    while not ek.ek(os.path.isfile, new_file):
+        if not ek.ek(os.path.isfile, old_file):
+            logger.log(u"Not creating backup, " + old_file + " doesn't exist", logger.DEBUG)
             break
 
         try:
-            logger.log(u"Attempting to back up " + oldFile + " before migration...")
-            shutil.copy(oldFile, newFile)
-            logger.log(u"Done backup, proceeding with migration.")
+            logger.log(u"Trying to back up " + old_file + " to " + new_file, logger.DEBUG)
+            shutil.copy(old_file, new_file)
+            logger.log(u"Backup done", logger.DEBUG)
             break
         except Exception, e:
-            logger.log(u"Error while trying to back up " + oldFile + ": " + ex(e))
+            logger.log(u"Error while trying to back up " + old_file + " to " + new_file + " : " + ex(e), logger.WARNING)
             numTries += 1
             time.sleep(1)
-            logger.log(u"Trying again.")
+            logger.log(u"Trying again.", logger.DEBUG)
 
         if numTries >= 10:
-            logger.log(u"Unable to back up " + oldFile + ", please do it manually.")
-            sys.exit(1)
+            logger.log(u"Unable to back up " + old_file + " to " + new_file + " please do it manually.", logger.ERROR)
+            return False
+
+    return True

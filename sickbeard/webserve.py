@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 # Author: Nic Wolfe <nic@wolfeden.ca>
 # URL: http://code.google.com/p/sickbeard/
 #
@@ -48,7 +51,7 @@ from sickbeard.common import SNATCHED, SKIPPED, UNAIRED, IGNORED, ARCHIVED, WANT
 from sickbeard.exceptions import ex
 from sickbeard.webapi import Api
 
-from lib.tvdb_api import tvdb_api
+from lib.tvdb_api import tvdb_api, tvdb_exceptions
 
 try:
     import json
@@ -76,10 +79,6 @@ class PageTemplate (Template):
         else:
             self.sbHost = re.match("^[^:]+", cherrypy.request.headers['Host'], re.X|re.M|re.S).group(0)
         self.projectHomePage = "http://code.google.com/p/sickbeard/"
-
-        if sickbeard.NZBS and sickbeard.NZBS_UID and sickbeard.NZBS_HASH:
-            logger.log(u"NZBs.org has been replaced, please check the config to configure the new provider!", logger.ERROR)
-            ui.notifications.error("NZBs.org Config Update", "NZBs.org has a new site. Please <a href=\""+sickbeard.WEB_ROOT+"/config/providers\">update your config</a> with the api key from <a href=\"http://nzbs.org/login\">http://nzbs.org</a> and then disable the old NZBs.org provider.")
 
         if "X-Forwarded-Host" in cherrypy.request.headers:
             self.sbHost = cherrypy.request.headers['X-Forwarded-Host']
@@ -650,6 +649,7 @@ ConfigMenu = [
     { 'title': 'Notifications',     'path': 'config/notifications/'    },
 ]
 
+
 class ConfigGeneral:
 
     @cherrypy.expose
@@ -739,16 +739,17 @@ class ConfigGeneral:
         else:
             version_notify = 0
 
-        if not config.change_LOG_DIR(log_dir):
-            results += ["Unable to create directory " + os.path.normpath(log_dir) + ", log dir not changed."]
-
         sickbeard.LAUNCH_BROWSER = launch_browser
+        # sickbeard.LOG_DIR is set in config.change_LOG_DIR()
 
         sickbeard.WEB_PORT = int(web_port)
         sickbeard.WEB_IPV6 = web_ipv6
-        sickbeard.WEB_LOG = web_log
+        # sickbeard.WEB_LOG is set in config.change_LOG_DIR()
         sickbeard.WEB_USERNAME = web_username
         sickbeard.WEB_PASSWORD = web_password
+
+        if not config.change_LOG_DIR(log_dir, web_log):
+            results += ["Unable to create directory " + os.path.normpath(log_dir) + ", log dir not changed."]
 
         if use_api == "on":
             use_api = 1
@@ -857,7 +858,6 @@ class ConfigSearch:
         sickbeard.NZBGET_CATEGORY = nzbget_category
         sickbeard.NZBGET_HOST = nzbget_host
 
-
         sickbeard.save_config()
 
         if len(results) > 0:
@@ -870,6 +870,7 @@ class ConfigSearch:
 
         redirect("/config/search/")
 
+
 class ConfigPostProcessing:
 
     @cherrypy.expose
@@ -881,7 +882,7 @@ class ConfigPostProcessing:
 
     @cherrypy.expose
     def savePostProcessing(self, naming_pattern=None, naming_multi_ep=None,
-                    xbmc_data=None, mediabrowser_data=None, synology_data=None, sony_ps3_data=None, wdtv_data=None, tivo_data=None,
+                    xbmc_data=None, xbmc_12plus_data=None, mediabrowser_data=None, synology_data=None, sony_ps3_data=None, wdtv_data=None, tivo_data=None,
                     use_banner=None, keep_processed_dir=None, process_automatically=None, rename_episodes=None,
                     move_associated_files=None, tv_download_dir=None, naming_custom_abd=None, naming_abd_pattern=None, delete_failed=None):
 
@@ -938,6 +939,7 @@ class ConfigPostProcessing:
         sickbeard.DELETE_FAILED = delete_failed
 
         sickbeard.metadata_provider_dict['XBMC'].set_config(xbmc_data)
+        sickbeard.metadata_provider_dict['XBMC 12+'].set_config(xbmc_12plus_data)
         sickbeard.metadata_provider_dict['MediaBrowser'].set_config(mediabrowser_data)
         sickbeard.metadata_provider_dict['Synology'].set_config(synology_data)
         sickbeard.metadata_provider_dict['Sony PS3'].set_config(sony_ps3_data)
@@ -1019,14 +1021,14 @@ class ConfigProviders:
     def canAddNewznabProvider(self, name):
 
         if not name:
-            return json.dumps({'error': 'Invalid name specified'})
+            return json.dumps({'error': 'No Provider Name specified'})
 
         providerDict = dict(zip([x.getID() for x in sickbeard.newznabProviderList], sickbeard.newznabProviderList))
 
         tempProvider = newznab.NewznabProvider(name, '')
 
         if tempProvider.getID() in providerDict:
-            return json.dumps({'error': 'Exists as '+providerDict[tempProvider.getID()].name})
+            return json.dumps({'error': 'Provider Name already exists as ' + providerDict[tempProvider.getID()].name})
         else:
             return json.dumps({'success': tempProvider.getID()})
 
@@ -1045,17 +1047,21 @@ class ConfigProviders:
             if not providerDict[name].default:
                 providerDict[name].name = name
                 providerDict[name].url = url
+
             providerDict[name].key = key
+            # a 0 in the key spot indicates that no key is needed
+            if key == '0':
+                providerDict[name].needs_auth = False
+            else:
+                providerDict[name].needs_auth = True
 
             return providerDict[name].getID() + '|' + providerDict[name].configStr()
 
         else:
 
-            newProvider = newznab.NewznabProvider(name, url, key)
+            newProvider = newznab.NewznabProvider(name, url, key=key)
             sickbeard.newznabProviderList.append(newProvider)
             return newProvider.getID() + '|' + newProvider.configStr()
-
-
 
     @cherrypy.expose
     def deleteNewznabProvider(self, id):
@@ -1073,13 +1079,12 @@ class ConfigProviders:
 
         return '1'
 
-
     @cherrypy.expose
     def saveProviders(self, nzbs_r_us_uid=None, nzbs_r_us_hash=None, newznab_string='',
                       omgwtfnzbs_username=None, omgwtfnzbs_apikey=None,
                       tvtorrents_digest=None, tvtorrents_hash=None,
                       torrentleech_key=None,
-                      btn_api_key=None,
+                      btn_api_key=None, hdbits_username=None, hdbits_passkey=None,
                       kerews_url=None, kerews_apikey=None, kerews_catIDs=None,
                       provider_order=None, nzbto_user=None, nzbto_pass=None, nzbto_proxy=None):
 
@@ -1099,23 +1104,33 @@ class ConfigProviders:
                 if not curNewznabProviderStr:
                     continue
 
-                curName, curURL, curKey, curCatIDs = curNewznabProviderStr.split('|')
 
-                newProvider = newznab.NewznabProvider(curName, curURL, curKey)
+                cur_name, cur_url, cur_key, cur_catids = curNewznabProviderStr.split('|')
 
-                curID = newProvider.getID()
+                if not cur_url.endswith('/'):
+                    cur_url = cur_url + '/'
+
+                newProvider = newznab.NewznabProvider(cur_name, cur_url, key=cur_key)
+
+                cur_id = newProvider.getID()
 
                 # if it already exists then update it
-                if curID in newznabProviderDict:
-                    newznabProviderDict[curID].name = curName
-                    newznabProviderDict[curID].url = curURL
-                    newznabProviderDict[curID].key = curKey
-                    newznabProviderDict[curID].catIDs = curCatIDs
+                if cur_id in newznabProviderDict:
+                    newznabProviderDict[cur_id].name = cur_name
+                    newznabProviderDict[cur_id].url = cur_url
+                    newznabProviderDict[cur_id].key = cur_key
+                    newznabProviderDict[cur_id].catIDs = cur_catids
+                    # a 0 in the key spot indicates that no key is needed
+                    if cur_key == '0':
+                        newznabProviderDict[cur_id].needs_auth = False
+                    else:
+                        newznabProviderDict[cur_id].needs_auth = True
+
                 else:
-                    newProvider.catIDs = curCatIDs
+                    newProvider.catIDs = cur_catids
                     sickbeard.newznabProviderList.append(newProvider)
 
-                finishedNames.append(curID)
+                finishedNames.append(cur_id)
 
             # delete anything that is missing
             for curProvider in sickbeard.newznabProviderList:
@@ -1141,12 +1156,12 @@ class ConfigProviders:
                 sickbeard.BINREQ = curEnabled
             elif curProvider == 'womble_s_index':
                 sickbeard.WOMBLE = curEnabled
-            elif curProvider == 'nzbx':
-                sickbeard.NZBX = curEnabled
             elif curProvider == 'omgwtfnzbs':
                 sickbeard.OMGWTFNZBS = curEnabled
             elif curProvider == 'ezrss':
                 sickbeard.EZRSS = curEnabled
+            elif curProvider == 'hdbits':
+                sickbeard.HDBITS = curEnabled
             elif curProvider == 'tvtorrents':
                 sickbeard.TVTORRENTS = curEnabled
             elif curProvider == 'torrentleech':
@@ -1159,6 +1174,9 @@ class ConfigProviders:
                 newznabProviderDict[curProvider].enabled = int(curEnabled)
             else:
                 logger.log(u"don't know what " + curProvider + " is, skipping")
+
+        sickbeard.HDBITS_USERNAME = hdbits_username.strip()
+        sickbeard.HDBITS_PASSKEY = hdbits_passkey.strip()
 
         sickbeard.TVTORRENTS_DIGEST = tvtorrents_digest.strip()
         sickbeard.TVTORRENTS_HASH = tvtorrents_hash.strip()
@@ -1181,6 +1199,7 @@ class ConfigProviders:
         sickbeard.OMGWTFNZBS_USERNAME = omgwtfnzbs_username.strip()
         sickbeard.OMGWTFNZBS_APIKEY = omgwtfnzbs_apikey.strip()
 
+        sickbeard.NEWZNAB_DATA = '!!!'.join([x.configStr() for x in sickbeard.newznabProviderList])
         sickbeard.PROVIDER_ORDER = provider_list
 
         sickbeard.save_config()
@@ -1191,7 +1210,7 @@ class ConfigProviders:
             ui.notifications.error('Error(s) Saving Configuration',
                         '<br />\n'.join(results))
         else:
-            ui.notifications.message('Configuration Saved', ek.ek(os.path.join, sickbeard.CONFIG_FILE) )
+            ui.notifications.message('Configuration Saved', ek.ek(os.path.join, sickbeard.CONFIG_FILE))
 
         redirect("/config/providers/")
 
@@ -1212,7 +1231,6 @@ class ConfigNotifications:
                           use_growl=None, growl_notify_onsnatch=None, growl_notify_ondownload=None, growl_host=None, growl_password=None,
                           use_prowl=None, prowl_notify_onsnatch=None, prowl_notify_ondownload=None, prowl_api=None, prowl_priority=0,
                           use_twitter=None, twitter_notify_onsnatch=None, twitter_notify_ondownload=None,
-                          use_notifo=None, notifo_notify_onsnatch=None, notifo_notify_ondownload=None, notifo_username=None, notifo_apisecret=None,
                           use_boxcar=None, boxcar_notify_onsnatch=None, boxcar_notify_ondownload=None, boxcar_username=None,
                           use_pushover=None, pushover_notify_onsnatch=None, pushover_notify_ondownload=None, pushover_userkey=None,
                           use_libnotify=None, libnotify_notify_onsnatch=None, libnotify_notify_ondownload=None,
@@ -1317,20 +1335,6 @@ class ConfigNotifications:
             use_twitter = 1
         else:
             use_twitter = 0
-
-        if notifo_notify_onsnatch == "on":
-            notifo_notify_onsnatch = 1
-        else:
-            notifo_notify_onsnatch = 0
-
-        if notifo_notify_ondownload == "on":
-            notifo_notify_ondownload = 1
-        else:
-            notifo_notify_ondownload = 0
-        if use_notifo == "on":
-            use_notifo = 1
-        else:
-            use_notifo = 0
 
         if boxcar_notify_onsnatch == "on":
             boxcar_notify_onsnatch = 1
@@ -1450,12 +1454,6 @@ class ConfigNotifications:
         sickbeard.TWITTER_NOTIFY_ONSNATCH = twitter_notify_onsnatch
         sickbeard.TWITTER_NOTIFY_ONDOWNLOAD = twitter_notify_ondownload
 
-        sickbeard.USE_NOTIFO = use_notifo
-        sickbeard.NOTIFO_NOTIFY_ONSNATCH = notifo_notify_onsnatch
-        sickbeard.NOTIFO_NOTIFY_ONDOWNLOAD = notifo_notify_ondownload
-        sickbeard.NOTIFO_USERNAME = notifo_username
-        sickbeard.NOTIFO_APISECRET = notifo_apisecret
-
         sickbeard.USE_BOXCAR = use_boxcar
         sickbeard.BOXCAR_NOTIFY_ONSNATCH = boxcar_notify_onsnatch
         sickbeard.BOXCAR_NOTIFY_ONDOWNLOAD = boxcar_notify_ondownload
@@ -1514,6 +1512,113 @@ class ConfigNotifications:
         redirect("/config/notifications/")
 
 
+class ConfigHidden:
+
+    @cherrypy.expose
+    def index(self):
+
+        t = PageTemplate(file="config_hidden.tmpl")
+        t.submenu = ConfigMenu
+        return _munge(t)
+
+    @cherrypy.expose
+    def saveHidden(self, anon_redirect=None, git_path=None, extra_scripts=None, create_missing_show_dirs=None, add_shows_wo_dir=None, ignore_words=None ):
+
+        results = []
+
+        if create_missing_show_dirs == "on":
+            create_missing_show_dirs = 1
+        else:
+            create_missing_show_dirs = 0
+
+        if add_shows_wo_dir == "on":
+            add_shows_wo_dir = 1
+        else:
+            add_shows_wo_dir = 0
+
+        sickbeard.ANON_REDIRECT = anon_redirect
+        sickbeard.GIT_PATH = git_path
+        sickbeard.EXTRA_SCRIPTS = [x.strip() for x in extra_scripts.split('|') if x.strip()]
+        sickbeard.CREATE_MISSING_SHOW_DIRS = create_missing_show_dirs
+        sickbeard.ADD_SHOWS_WO_DIR = add_shows_wo_dir
+        sickbeard.IGNORE_WORDS = ignore_words
+
+        sickbeard.save_config()
+
+        if len(results) > 0:
+            for x in results:
+                logger.log(x, logger.ERROR)
+            ui.notifications.error('Error(s) Saving Configuration',
+                        '<br />\n'.join(results))
+        else:
+            ui.notifications.message('Configuration Saved', ek.ek(os.path.join, sickbeard.CONFIG_FILE) )
+
+        redirect("/config/hidden/")
+
+    @cherrypy.expose
+    def sbEnded(self, username=None):
+        cherrypy.response.headers['Cache-Control'] = "max-age=0,no-cache,no-store"
+
+        ltvdb_api_parms = sickbeard.TVDB_API_PARMS.copy()
+        t = tvdb_api.Tvdb(**ltvdb_api_parms)
+
+        results = []
+        errMatch = []
+        changeState = []
+
+        myDB = db.DBConnection()
+        sql_result = myDB.select("SELECT tvdb_id,show_name,status FROM tv_shows WHERE status != 'Continuing' ORDER BY show_id DESC LIMIT 400")
+        myDB.connection.close()
+
+        if (len(sql_result)) > 1:
+            logger.log(u"There were " + str(len(sql_result)) + " shows in your database that need checking (limited to 400).", logger.MESSAGE)
+            results.append("There were <b>" + str(len(sql_result)) + "</b> shows in your database that need checking (limited to 400).<br>")
+        else:
+            logger.log(u"There were no shows that needed to be checked at this time.", logger.MESSAGE)
+            results.append("There were no shows that needed to be checked at this time.<br>")
+
+        for ended_show in sql_result:
+
+            tvdb_id = ended_show['tvdb_id']
+            show_name = ended_show['show_name']
+            status = ended_show['status']
+
+            try:
+                show = t[show_name]
+            except:
+                logger.log(u"Issue found when looking up \"%s\"" % (show_name), logger.ERROR)
+                continue
+
+            logger.log(u"Checking \"%s\" with local status \"%s\" against thetvdb" % (show_name, status), logger.MESSAGE)
+
+            show_id = show['id']
+            if int(tvdb_id) != int(show_id):
+                logger.log("Warning: Issue matching \"%s\" on tvdb. Got \"%s\" and \"%s\"" % (show_name, tvdb_id, show_id), logger.ERROR)
+                errMatch.append("<tr><td class='tvShow'><a target='_blank' href='%s/home/displayShow?show=%s'>%s</a></td><td>%s</td><td>%s</td>" % (sickbeard.WEB_ROOT, tvdb_id, show_name, tvdb_id, show_id))
+            else:
+                show_status = show['status']
+
+                if not show_status:
+                    show_status = ""
+
+                if show_status != status:
+                    changeState.append("<tr><td class='tvShow'><a target='_blank' href='%s/home/displayShow?show=%s'>%s</a></td><td>%s</td><td>%s</td>" % (sickbeard.WEB_ROOT, tvdb_id, show_name, status, show_status))
+
+            show.clear()  # needed to free up memory since python's garbage collection would keep this around
+
+        if len(errMatch):
+            errMatch.insert(0, "<br>These shows need to be removed then added back to Sick Beard to correct their TVDBID.<br><table class='tablesorter'><thead><tr><th>show name</th><th>local tvdbid</th><th>remote tvdbid</th></tr></thead>")
+            errMatch.append("</table>")
+            results += errMatch
+
+        if len(changeState):
+            changeState.insert(0, "<br>These shows need to have 'force full update' ran on them to correct their status.<br><table class='tablesorter'><thead><tr><th>show name</th><th>local status</th><th>remote status</th></tr></thead>")
+            changeState.append("</table>")
+            results += changeState
+
+        return results
+
+
 class Config:
 
     @cherrypy.expose
@@ -1533,11 +1638,16 @@ class Config:
 
     notifications = ConfigNotifications()
 
+    hidden = ConfigHidden()
+
+
 def haveXBMC():
     return sickbeard.USE_XBMC and sickbeard.XBMC_UPDATE_LIBRARY
 
+
 def havePLEX():
     return sickbeard.USE_PLEX and sickbeard.PLEX_UPDATE_LIBRARY
+
 
 def HomeMenu():
     return [
@@ -1545,9 +1655,10 @@ def HomeMenu():
         { 'title': 'Manual Post-Processing', 'path': 'home/postprocess/'                                        },
         { 'title': 'Update XBMC',            'path': 'home/updateXBMC/', 'requires': haveXBMC                   },
         { 'title': 'Update Plex',            'path': 'home/updatePLEX/', 'requires': havePLEX                   },
-        { 'title': 'Restart',                'path': 'home/restart/?pid='+str(sickbeard.PID), 'confirm': True   },
-        { 'title': 'Shutdown',               'path': 'home/shutdown/?pid='+str(sickbeard.PID), 'confirm': True                          },
+        { 'title': 'Restart',                'path': 'home/restart/?pid=' + str(sickbeard.PID), 'confirm': True   },
+        { 'title': 'Shutdown',               'path': 'home/shutdown/?pid=' + str(sickbeard.PID), 'confirm': True  },
     ]
+
 
 class HomePostProcess:
 
@@ -1974,12 +2085,12 @@ class ErrorLogs:
         minLevel = int(minLevel)
 
         data = []
-        if os.path.isfile(logger.sb_log_instance.log_file):
-            f = ek.ek(open, logger.sb_log_instance.log_file)
+        if os.path.isfile(logger.sb_log_instance.log_file_path):
+            f = ek.ek(open, logger.sb_log_instance.log_file_path)
             data = f.readlines()
             f.close()
 
-        regex =  "^(\w{3})\-(\d\d)\s*(\d\d)\:(\d\d):(\d\d)\s*([A-Z]+)\s*(.+?)\s*\:\:\s*(.*)$"
+        regex = "^(\d\d\d\d)\-(\d\d)\-(\d\d)\s*(\d\d)\:(\d\d):(\d\d)\s*([A-Z]+)\s*(.+?)\s*\:\:\s*(.*)$"
 
         finalData = []
 
@@ -1993,7 +2104,7 @@ class ErrorLogs:
             match = re.match(regex, x)
 
             if match:
-                level = match.group(6)
+                level = match.group(7)
                 if level not in logger.reverseNames:
                     lastLine = False
                     continue
@@ -2088,16 +2199,6 @@ class Home:
             return "Test prowl notice sent successfully"
         else:
             return "Test prowl notice failed"
-
-    @cherrypy.expose
-    def testNotifo(self, username=None, apisecret=None):
-        cherrypy.response.headers['Cache-Control'] = "max-age=0,no-cache,no-store"
-
-        result = notifiers.notifo_notifier.test_notify(username, apisecret)
-        if result:
-            return "Notifo notification succeeded. Check your Notifo clients to make sure it worked"
-        else:
-            return "Error sending Notifo notification"
 
     @cherrypy.expose
     def testBoxcar(self, username=None):
@@ -2656,7 +2757,7 @@ class Home:
                     epObj.status = int(status)
                     epObj.saveToDB()
 
-        msg = "Backlog was automatically started for the following seasons of <b>"+showObj.name+"</b>:<br />"
+        msg = "Backlog was automatically started for the following seasons of <b>" + showObj.name + "</b>:<br /><ul>"
         for cur_segment in segment_list:
             msg += "<li>Season "+str(cur_segment)+"</li>"
             logger.log(u"Sending backlog for "+showObj.name+" season "+str(cur_segment)+" because some eps were set to wanted")
@@ -2913,14 +3014,14 @@ class WebInterface:
 
         done_show_list = []
         qualList = Quality.DOWNLOADED + Quality.SNATCHED + [ARCHIVED, IGNORED]
-        sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes, tv_shows WHERE season != 0 AND airdate >= ? AND airdate < ? AND tv_shows.tvdb_id = tv_episodes.showid AND tv_episodes.status NOT IN ("+','.join(['?']*len(qualList))+")", [today, next_week] + qualList)
+        sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes, tv_shows WHERE season != 0 AND airdate >= ? AND airdate < ? AND tv_shows.tvdb_id = tv_episodes.showid AND tv_episodes.status NOT IN (" + ','.join(['?'] * len(qualList)) + ")", [today, next_week] + qualList)
         for cur_result in sql_results:
             done_show_list.append(int(cur_result["showid"]))
 
-        more_sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes outer_eps, tv_shows WHERE season != 0 AND showid NOT IN ("+','.join(['?']*len(done_show_list))+") AND tv_shows.tvdb_id = outer_eps.showid AND airdate = (SELECT airdate FROM tv_episodes inner_eps WHERE inner_eps.showid = outer_eps.showid AND inner_eps.airdate >= ? ORDER BY inner_eps.airdate ASC LIMIT 1) AND outer_eps.status NOT IN ("+','.join(['?']*len(Quality.DOWNLOADED+Quality.SNATCHED))+")", done_show_list + [next_week] + Quality.DOWNLOADED + Quality.SNATCHED)
+        more_sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes outer_eps, tv_shows WHERE season != 0 AND showid NOT IN (" + ','.join(['?'] * len(done_show_list)) + ") AND tv_shows.tvdb_id = outer_eps.showid AND airdate = (SELECT airdate FROM tv_episodes inner_eps WHERE inner_eps.season != 0 AND inner_eps.showid = outer_eps.showid AND inner_eps.airdate >= ? ORDER BY inner_eps.airdate ASC LIMIT 1) AND outer_eps.status NOT IN (" + ','.join(['?'] * len(Quality.DOWNLOADED + Quality.SNATCHED)) + ")", done_show_list + [next_week] + Quality.DOWNLOADED + Quality.SNATCHED)
         sql_results += more_sql_results
 
-        more_sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes, tv_shows WHERE season != 0 AND tv_shows.tvdb_id = tv_episodes.showid AND airdate < ? AND airdate >= ? AND tv_episodes.status = ? AND tv_episodes.status NOT IN ("+','.join(['?']*len(qualList))+")", [today, recently, WANTED] + qualList)
+        more_sql_results = myDB.select("SELECT *, tv_shows.status as show_status FROM tv_episodes, tv_shows WHERE season != 0 AND tv_shows.tvdb_id = tv_episodes.showid AND airdate < ? AND airdate >= ? AND tv_episodes.status = ? AND tv_episodes.status NOT IN (" + ','.join(['?'] * len(qualList)) + ")", [today, recently, WANTED] + qualList)
         sql_results += more_sql_results
 
         #epList = sickbeard.comingList

@@ -15,20 +15,26 @@ $(document).ready(function(){
 
     $.fn.addProvider = function (id, name, url, key, catIDs, isDefault) {
 
+        url = $.trim(url);
+        if (!url)
+            return;
+
+        if (!/^https?:\/\//i.test(url))
+            url = "http://" + url;
+
         if (url.match('/$') == null)
-            url = url + '/'
+            url = url + '/';
 
         var newData = [isDefault, [name, url, key, catIDs]];
         newznabProviders[id] = newData;
 
-        if (!isDefault)
-        {
+        if (!isDefault) {
             $('#editANewznabProvider').addOption(id, name);
             $(this).populateNewznabSection();
         }
 
         if ($('#providerOrderList > #'+id).length == 0) {
-            var toAdd = '<li class="ui-state-default" id="'+id+'"> <input type="checkbox" id="enable_'+id+'" class="provider_enabler" CHECKED> <a href="'+url+'" class="imgLink" target="_new"><img src="'+sbRoot+'/images/providers/newznab.gif" alt="'+name+'" width="16" height="16"></a> '+name+'</li>'
+            var toAdd = '<li class="ui-state-default" id="'+id+'"> <input type="checkbox" id="enable_'+id+'" class="provider_enabler" CHECKED> <a href="'+url+'" class="imgLink" target="_new"><img src="'+sbRoot+'/images/providers/newznab.png" alt="'+name+'" width="16" height="16"></a> '+name+'<span class="ui-icon ui-icon-arrowthick-2-n-s pull-right"></span></li>';
 
             $('#providerOrderList').append(toAdd);
             $('#providerOrderList').sortable("refresh");
@@ -83,6 +89,7 @@ $(document).ready(function(){
         $('#newznab_key').val(data[2]);
         $('#newznab_catIDs').val(data[3]);
 
+
         if (selectedProvider == 'addNewznab') {
             $('#newznab_name').removeAttr("disabled");
             $('#newznab_url').removeAttr("disabled");
@@ -109,7 +116,7 @@ $(document).ready(function(){
             provStrings.push(newznabProviders[id][1].join('|'));
         }
 
-        $('#newznab_string').val(provStrings.join('!!!'))
+        $('#newznab_string').val(provStrings.join('!!!'));
 
     }
 
@@ -144,8 +151,8 @@ $(document).ready(function(){
 
         var selectedProvider = $('#editANewznabProvider :selected').val();
 
-		if (selectedProvider == "addNewznab")
-			return;
+        if (selectedProvider == "addNewznab")
+            return;
 
         var url = $('#newznab_url').val();
         var key = $('#newznab_key').val();
@@ -177,22 +184,28 @@ $(document).ready(function(){
         var key = $('#newznab_key').val();
         var catIDs = $('#newznab_catIDs').val();
 
-        var params = { name: name }
 
-        if (catIDs == "") {
-        	alert("Categorie IDs is a mandatory field. Can't save provider [" + name + "]");
-    	} else {
-	        // send to the form with ajax, get a return value
-    	    $.getJSON(sbRoot + '/config/providers/canAddNewznabProvider', params,
-        	    function(data){
-            	    if (data.error != undefined) {
-                	    alert(data.error);
-                    	return;
-                	}
+        if (!name)
+            return;
 
-	                $(this).addProvider(data.success, name, url, key, catIDs, 0);
-    	    });
-		}
+        if (!url)
+            return;
+
+        if (!key)
+            return;
+
+        var params = {name: name};
+
+        // send to the form with ajax, get a return value
+        $.getJSON(sbRoot + '/config/providers/canAddNewznabProvider', params,
+            function(data){
+                if (data.error != undefined) {
+                    alert(data.error);
+                    return;
+                }
+
+                $(this).addProvider(data.success, name, url, key, 0);
+        });
 
     });
 
